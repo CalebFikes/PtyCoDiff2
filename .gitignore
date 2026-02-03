@@ -1,0 +1,36 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environments
+conda-env/
+env/
+miniconda3/
+old-ml-env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor
+.vscode/
+
+# Logs and runs
+logs/
+runs/
+
+# Model weights and large outputs
+weights/
+*.npz
+*.npy
+*.ckpt
+*.pth
+
+# Images and plots
+*.png
+*.jpg
+
+# Misc
+archive/
+.pytest_cache/
+*.egg-info/
