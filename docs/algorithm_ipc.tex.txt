@@ -1,0 +1,33 @@
+\begin{algorithm}[t]
+\caption{IPC posterior sampling (VP reverse-SDE / Euler--Maruyama; continuous scan $\xi$)}
+\label{alg:ipc}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} score model $s_\psi(\theta,t)$, scan positions $\{\xi_j\}_{j=1}^J$, photon counts $\{f_j\}_{j=1}^J$, probe $w$, DFT $F$, exposure $R$, schedules $\{\sigma(t_k)\}_{k=0}^N$ (and corresponding $\alpha(t_k)$), measurement weight $\tau$, numerical floor $\varepsilon_{\rm safe}$
+\STATE \textbf{Define} patch extractor $O_{\xi}$ (continuous extraction) and its adjoint $O_{\xi}^H$
+\STATE Sample $\theta_N\sim\mathcal{CN}(0,I)$ (complex circular Gaussian)
+\FOR{$k=N,N-1,\dots,1$}
+  \STATE $t_k \leftarrow$ current time; $dt\leftarrow |t_k-t_{k-1}|$
+  \STATE $g_k \leftarrow g(t_k) \coloneqq \frac{\pi}{2}\,\alpha(t_k)$ \hfill (VP diffusion coefficient)
+  \STATE For each scan $j$: \quad $z_j \leftarrow O_{\xi_j}(\theta_k)$ \hfill (extract patch)
+  \STATE $a_j \leftarrow F\,[\operatorname{diag}(w)\,z_j]$\quad;\quad $\lambda_j \leftarrow R\,|a_j|^2 + \varepsilon_{\rm safe}$
+  \STATE $r_j \leftarrow a_j \odot\bigl(f_j \oslash \lambda_j - \mathbf{1}\bigr)$
+  \STATE Measurement score (average over scans):
+    \[
+      s_{\text{meas}}(\theta_k)\;=\;\frac{1}{J}\sum_{j=1}^J O_{\xi_j}^{H}\,\operatorname{diag}(w)^{H}\,F^{H}\,r_j
+    \]
+  \STATE Prior score: $s_{\text{prior}} \leftarrow s_\psi(\theta_k,t_k)$
+  \STATE Sample $\;z_k\sim\mathcal{CN}(0,I)\;$ (complex circular noise)
+  \STATE Euler--Maruyama reverse step:
+    \[
+      \theta_{k-1}
+      \;=\;
+      \theta_k
+      \;+
+      \;g_k^{2}\,\bigl(s_{\text{prior}} + \tau\,s_{\text{meas}}(\theta_k)\bigr)\,dt
+      \;+
+      \;g_k\,\sqrt{dt}\;z_k
+    \]
+\ENDFOR
+\STATE \textbf{Return:} $\theta_0$
+\end{algorithmic}
+\end{algorithm}

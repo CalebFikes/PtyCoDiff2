@@ -20,10 +20,18 @@ def sample_cn(key: jnp.ndarray, shape, dtype=jnp.complex64):
 
 
 def cosine_alpha_sigma(t: jnp.ndarray):
-    """Cosine VP schedule: returns (alpha, sigma)."""
-    a = jnp.cos(jnp.pi * 0.5 * t)
-    s = jnp.sin(jnp.pi * 0.5 * t)
-    return a, s
+    """Cosine VP schedule matching `training/train.py` with small s-offset.
+
+    Returns (alpha, sigma) where alpha = cos((t + s0)/(1+s0) * pi/2)
+    and sigma = sqrt(1 - alpha^2). This matches the forward noising used
+    during training so the reverse SDE uses a consistent schedule.
+    """
+    s0 = 0.008
+    t_ = jnp.clip(t, 0.0, 1.0)
+    f = jnp.cos((t_ + s0) / (1.0 + s0) * jnp.pi / 2.0)
+    alpha = f
+    sigma = jnp.sqrt(jnp.clip(1.0 - f ** 2, 0.0, 1.0))
+    return alpha, sigma
 
 
 def make_sampler(cfg: dict, forward_ops: Any, score_apply: Callable, drift_fn: Optional[Callable] = None):

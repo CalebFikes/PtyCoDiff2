@@ -30,20 +30,22 @@ export JAX_LOG_COMPILES=1
 
 # Exposed hyperparameters (can be overridden by environment or sbatch `--export`)
 DATASET_DIR=${DATASET_DIR:-/local/scratch/cfikes/datasets/mnist}
-EPOCHS=${EPOCHS:-2000}
+EPOCHS=${EPOCHS:-50}
 BATCH_SIZE=${BATCH_SIZE:-128}
-LR=${LR:-2e-6}
-GAMMA=${GAMMA:-0.9999}
+LR=${LR:-1e-3}
+GAMMA=${GAMMA:-0.99999}
 EMA_DECAY=${EMA_DECAY:-0.99}
 BETA=${BETA:-0.0}
 MU_MAX=${MU_MAX:-10.0}
-OUT_WEIGHTS=${OUT_WEIGHTS:-/local/scratch/cfikes/PtyCoDiff2/weights/no_attn2}
-BASE_CH=${BASE_CH:-32}
-MIXING=${MIXING:-0.01}
+OUT_WEIGHTS=${OUT_WEIGHTS:-/local/scratch/cfikes/PtyCoDiff2/weights/no_attn3}
+BASE_CH=${BASE_CH:-16}
+MIXING=${MIXING:-0.0}
 ATT_SCALE=${ATT_SCALE:-0}
 N_T=${N_T:-128}
-MAX_GRAD_NORM=${MAX_GRAD_NORM:-1000.0}
-DIAGNOSTICS=${DIAGNOSTICS:-0}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-10.0}
+DIAGNOSTICS=${DIAGNOSTICS:-1}
+#--lr 1e-4 --gamma 0.99999 --ema_decay 0.99 --beta 0.0 --mu_max 10.0 --base_ch 16 --mixing 0.0 --att_scale 0 --n_t 128 --out_weights /local/scratch/cfikes/PtyCoDiff2/weights/no_attn2 --max_grad_norm 10.0 --time_reweight_alpha 1.0 --time_reweight_lambda 3.0 --dc_weight 0 --b1 0.95 --b2 0.999 --diagnostics
+
 
 # Time reweighting for DSM loss: weight(t) = 1 + alpha * exp(-lambda * t)
 # Suggested: alpha >= 1.0 (makes earliest timesteps >=2x last timestep).

@@ -42,6 +42,8 @@ def adam_init(params):
 
 def adam_update(params, grads, m, v, step, lr=1e-4, max_grad_norm=1.0, b1=0.95, b2=0.999, eps=1e-8):
     # Adam optimizer with gradient clipping
+    # sanitize gradients: replace NaN with 0 and infinities with large finite values
+    grads = jax.tree_util.tree_map(lambda g: jnp.nan_to_num(g, nan=0.0, posinf=1e6, neginf=-1e6), grads)
     gnorm = jnp.sqrt(sum([jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(grads)]))
     clip_coef = jnp.minimum(1.0, max_grad_norm / (gnorm + 1e-6))
     grads = jax.tree_util.tree_map(lambda g: g * clip_coef, grads)
@@ -110,7 +112,7 @@ def main():
     parser.add_argument('--beta', type=float, default=0.0)
     parser.add_argument('--mu_max', type=float, default=10.0)
     parser.add_argument('--base_ch', type=int, default=32)
-    parser.add_argument('--mixing', type=float, default=0.01)
+    # `mixing` removed; mixing behavior is handled by model defaults / checkpoint metadata
     parser.add_argument('--att_scale', type=float, default=0)
     parser.add_argument('--n_t', type=int, default=128)
     parser.add_argument('--out_weights', type=str, required=True)
@@ -135,7 +137,7 @@ def main():
         subkey,
         input_shape=(28, 28, 1),
         base_ch=args.base_ch,
-        mixing=args.mixing
+        att_scale=args.att_scale
     )
     params = sanitize_params(params)
     m, v = adam_init(params)
@@ -144,8 +146,11 @@ def main():
 
     steps_per_epoch = N // args.batch_size
     total_steps = args.epochs * steps_per_epoch
+    # checkpoint every 10% of total steps
+    ckpt_interval = max(1, total_steps // 10)
     print(f'Starting training for {args.epochs} epochs ({total_steps} steps)...')
     t0 = time.time()
+    epoch_loss_sum = 0.0
     for step in range(total_steps):
         key, subkey = jax.random.split(key)
         batch_indices = jax.random.randint(subkey, (args.batch_size,), 0, N)
@@ -161,6 +166,25 @@ def main():
         eps = sample_cn(subkey, batch.shape)
         x_t = a * batch + s * eps
 
+        # Lightweight periodic check: compute batch MSE and only report NaN/Inf if present
+        if (args.debug != 0 or args.diagnostics) and (step % 20 == 0):
+            try:
+                eps_pred_check = apply_fn(params, x_t, t)
+                eps_np = np.array(eps_pred_check)
+                # compute mean squared error on host (lightweight)
+                eps_target = np.array(eps)
+                batch_mse = float(np.mean(np.abs(eps_np - eps_target) ** 2))
+                nan_count = int(np.isnan(eps_np).sum())
+                inf_count = int(np.isinf(eps_np).sum())
+                #print avg loss, mean|eps_pred|, mean|eps|, grad_norm, lr
+                
+                
+                # if nan_count > 0 or inf_count > 0:
+                #     print(f"DebugCheck Step {step}: batch_mse={batch_mse:.6e} nan={nan_count} inf={inf_count}")
+                # else:
+                #     print(f"DebugCheck Step {step}: batch_mse={batch_mse:.6e}")
+            except Exception as e:
+                print(f"DebugCheck Step {step}: apply_fn error: {e}")
         def loss_fn(params):
             eps_pred = apply_fn(params, x_t, t)
             # Score loss (per-pixel MSE)
@@ -188,6 +212,7 @@ def main():
             return score_loss + args.beta * gauge_loss, (score_loss, gauge_loss)
 
         (loss_val, (score_loss_val, gauge_loss_val)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+        epoch_loss_sum += float(loss_val)
         params, m, v, gnorm, gcoef = adam_update(
             params, grads, m, v, step,
             lr=args.lr, max_grad_norm=args.max_grad_norm, b1=args.b1, b2=args.b2
@@ -196,38 +221,37 @@ def main():
             lambda e, p: args.ema_decay * e + (1.0 - args.ema_decay) * p,
             ema_params, params
         )
-        # Print diagnostics if debug!=0 every 10 steps, else only at epoch end
-        if args.debug != 0 and (step % 10 == 0 or (step + 1) % steps_per_epoch == 0):
-            print(f"Step {step} loss={float(loss_val):.6e} score={float(score_loss_val):.6e} gauge={float(gauge_loss_val):.6e} grad_norm={float(gnorm):.3e} clip_coef={float(gcoef):.3e}")
+        args.lr = args.lr * args.gamma
+        if (step - 1) % 20 == 0 and (args.debug != 0 or args.diagnostics):
+            print(f"Step {step}: batch_mse={batch_mse:.6e} mean|eps_pred|={float(np.mean(np.abs(eps_np))):.6e} mean|eps|={float(np.mean(np.abs(eps_target))):.6e} gnorm = {gnorm:.6e} lr={args.lr:.3e}")
+
+        # Checkpoint at regular intervals (every 10% of training)
+        if (step + 1) % ckpt_interval == 0:
+            pct = int(round(100.0 * (step + 1) / float(total_steps)))
+            base, ext = os.path.splitext(args.out_weights)
+            if ext == '':
+                ext = '.npz'
+            ckpt_name = f"{base}.ckpt_{pct:03d}{ext}"
+            meta_ckpt = dict(vars(args))
+            meta_ckpt.update({'step': int(step + 1), 'pct': pct})
+            try:
+                save_pytree_npz(ckpt_name, params, ema_params, meta_ckpt)
+                print(f"Saved checkpoint {ckpt_name} at {pct}% ({step+1}/{total_steps})")
+            except Exception as e:
+                print(f"Warning: failed to save checkpoint {ckpt_name}: {e}")
+        # (Silent per-step) -- removed verbose per-step prints; we only print per-epoch averages now.
         if (step + 1) % steps_per_epoch == 0:
             epoch = (step + 1) // steps_per_epoch
-            # Compute diagnostics for this epoch
-            if args.debug != 0:
-                # Use a fixed batch for diagnostics
-                key_diag = jax.random.PRNGKey(epoch)
-                batch_indices = jax.random.randint(key_diag, (args.batch_size,), 0, N)
-                batch = images[batch_indices]
-                t_diag = t_grid[jax.random.randint(key_diag, (args.batch_size,), 1, t_grid.shape[0])]
-                a_diag, s_diag = cosine_alpha_sigma(t_diag)
-                a_diag = a_diag.reshape((args.batch_size, 1, 1, 1))
-                s_diag = s_diag.reshape((args.batch_size, 1, 1, 1))
-                key_eps = jax.random.PRNGKey(epoch + 9999)
-                eps_diag = sample_cn(key_eps, batch.shape)
-                x_t_diag = a_diag * batch + s_diag * eps_diag
-                eps_pred_diag = apply_fn(params, x_t_diag, t_diag)
-                mean_eps_pred = float(jnp.mean(jnp.abs(eps_pred_diag)))
-                mean_eps = float(jnp.mean(jnp.abs(eps_diag)))
-                implied_score_mag = float(jnp.mean(jnp.abs(eps_pred_diag) / (jnp.maximum(s_diag, 1e-6))))
-                # Compute param norm
-                def tree_norm(tree):
-                    leaves = jax.tree_util.tree_leaves(tree)
-                    return float(jnp.sqrt(sum([jnp.sum(jnp.square(x)) for x in leaves])))
-                param_norm = tree_norm(params)
-                print(f"Step {step} mean|eps_pred|={mean_eps_pred:.6e} mean|eps|={mean_eps:.6e} implied_score_mag={implied_score_mag:.6e}")
-                print(f"Epoch {epoch}/{args.epochs} loss={float(loss_val):.6e} time={time.time()-t0:.2f}s grad_norm={float(gnorm):.6e} param_norm={param_norm:.6e}")
-            else:
-                print(f"Epoch {epoch}/{args.epochs} loss={float(loss_val):.6e} score={float(score_loss_val):.6e} gauge={float(gauge_loss_val):.6e} time={time.time()-t0:.2f}s grad_norm={float(gnorm):.3e}")
+            # Print only per-epoch average loss (and elapsed time)
+            epoch_avg = epoch_loss_sum / float(steps_per_epoch)
+            print(f"Epoch {epoch}/{args.epochs} avg_loss={epoch_avg:.6e} time={time.time()-t0:.2f}s")
+            epoch_loss_sum = 0.0
             t0 = time.time()
+            # print norm of difference of current params and ema params
+            diff_norm = jnp.sqrt(sum([jnp.sum(jnp.abs(p - e) ** 2) for p, e in zip(jax.tree_util.tree_leaves(params), jax.tree_util.tree_leaves(ema_params))]))
+            print(f"Epoch {epoch}: ||params - ema_params||={float(diff_norm):.6e}")
+
+            
     meta_dict = vars(args)
     save_pytree_npz(args.out_weights, params, ema_params, meta_dict)
     print('Training complete!')

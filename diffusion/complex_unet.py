@@ -2,7 +2,7 @@
 
 Implements two parallel real-valued UNet streams with ResNet blocks,
 GroupNorm, lightweight self-attention, weight-standardized convolutions,
-and cross-channel mixing modules inserted after ResNet/attention blocks.
+and cross-channel mixing is performed by 1x1 convolutions after each block, treating real/imag as a 2-channel image.
 
 This implementation focuses on correctness and clarity rather than maximal
 performance; it is suitable for training and smoke tests and follows the
@@ -32,9 +32,14 @@ def ws_conv_apply(params: Dict[str, jnp.ndarray], x: jnp.ndarray, stride: int = 
     w = params['w']
     b = params['b']
     # weight standardization over spatial + in channels
-    mean = jnp.mean(w, axis=(0, 1, 2), keepdims=True)
-    var = jnp.mean((w - mean) ** 2, axis=(0, 1, 2), keepdims=True)
-    w_std = (w - mean) / jnp.sqrt(var + 1e-5)
+    # Skip WS for 1x1 kernels (mix/proj 1x1) to avoid amplifying near-constant kernels
+    kh, kw = w.shape[0], w.shape[1]
+    if kh == 1 and kw == 1:
+        w_std = w
+    else:
+        mean = jnp.mean(w, axis=(0, 1, 2), keepdims=True)
+        var = jnp.mean((w - mean) ** 2, axis=(0, 1, 2), keepdims=True)
+        w_std = (w - mean) / jnp.sqrt(var + 1e-5)
     dimension_numbers = ('NHWC', 'HWIO', 'NHWC')
     y = jax.lax.conv_general_dilated(x, w_std, (stride, stride), padding, dimension_numbers=dimension_numbers)
     return y + b
@@ -173,17 +178,6 @@ def self_attention_apply(params, x):
     return out
 
 
-def mix_module_init(rng, channels, mixing=0.3):
-    # mixing weights as per-channel or scalar
-    mix = jnp.array(mixing, dtype=jnp.float32)
-    return {'mix': mix}
-
-
-def mix_module_apply(params, feat_real, feat_imag):
-    mix = params['mix']
-    real_out = (1.0 - mix) * feat_real + mix * feat_imag
-    imag_out = (1.0 - mix) * feat_imag - mix * feat_real
-    return real_out, imag_out
 
 
 def downsample(x):
@@ -226,129 +220,77 @@ def complexUnet_init(rng, input_shape: Tuple[int, int, int], base_ch: int = 32, 
 
     input_shape: (H, W, C) where C=1 typically. Returns (params, apply_fn).
     """
+
     H, W, C = input_shape
-    rngs = list(jax.random.split(rng, 200))
+    rngs = list(jax.random.split(rng, 100))
     def next_rng():
         return rngs.pop(0)
-    # encoder channels
     ch1 = base_ch
     ch2 = base_ch * 2
     ch3 = base_ch * 4
     ch4 = base_ch * 8
 
     params = {}
-    # stream params
-    params['real'] = {}
-    params['imag'] = {}
-
-    # level 1
-    # Add per-block time projection parameters: small learned linear map from
-    # sinusoidal embedding to out_ch bias. Choose embedding dim = 128.
     TIME_EMB_DIM = 128
-    key = next_rng()
-    rb = resnet_block_init(key, C, ch1)
-    tk = jax.random.split(key, 3)[-1]
-    rb['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
-    key = next_rng()
-    ib = resnet_block_init(key, C, ch1)
-    tk = jax.random.split(key, 3)[-1]
-    ib['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
-    params['real']['r1'] = rb
-    params['imag']['r1'] = ib
-    params['m1'] = mix_module_init(next_rng(), ch1, mixing)
+    # Mixing is now a 1x1 conv for 2 channels (real/imag), scaled by mixing parameter
+    def scaled_ws_conv_init(rng, channels, mixing):
+        # Interpolate between identity and full mixing for (channels, channels)
+        # If mixing is exactly zero, initialize as zeros to avoid large WS scaling
+        if float(mixing) == 0.0:
+            w = jnp.zeros((channels, channels), dtype=jnp.float32)
+        else:
+            w = jnp.eye(channels) * (1.0 - mixing) + jnp.ones((channels, channels)) * (mixing / channels)
+        w = w.reshape((1, 1, channels, channels))
+        b = jnp.zeros((channels,), dtype=jnp.float32)
+        return {'w': w, 'b': b}
+    params['mix1'] = scaled_ws_conv_init(next_rng(), ch1, mixing)
+    params['mix2'] = scaled_ws_conv_init(next_rng(), ch2, mixing)
+    params['mix3'] = scaled_ws_conv_init(next_rng(), ch3, mixing)
+    params['mixb'] = scaled_ws_conv_init(next_rng(), ch4, mixing * 1.5)
 
-    # level 2
-    key = next_rng()
-    rb2 = resnet_block_init(key, ch1, ch2)
-    tk = jax.random.split(key, 3)[-1]
-    rb2['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
-    key = next_rng()
-    ib2 = resnet_block_init(key, ch1, ch2)
-    tk = jax.random.split(key, 3)[-1]
-    ib2['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
-    params['real']['r2'] = rb2
-    params['imag']['r2'] = ib2
-    params['m2'] = mix_module_init(next_rng(), ch2, mixing)
+    # Encoder blocks
+    params['r1'] = resnet_block_init(next_rng(), 2, ch1)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['r1']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
+    params['r2'] = resnet_block_init(next_rng(), ch1, ch2)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['r2']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
+    params['r3'] = resnet_block_init(next_rng(), ch2, ch3)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['r3']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
+    params['rb'] = resnet_block_init(next_rng(), ch3, ch4)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['rb']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch4)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch4,), dtype=jnp.float32)}
 
-    # level 3
-    key = next_rng()
-    rb3 = resnet_block_init(key, ch2, ch3)
-    tk = jax.random.split(key, 3)[-1]
-    rb3['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
-    key = next_rng()
-    ib3 = resnet_block_init(key, ch2, ch3)
-    tk = jax.random.split(key, 3)[-1]
-    ib3['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
-    params['real']['r3'] = rb3
-    params['imag']['r3'] = ib3
-    params['m3'] = mix_module_init(next_rng(), ch3, mixing)
-
-    # bottleneck
-    key = next_rng()
-    rbb = resnet_block_init(key, ch3, ch4)
-    tk = jax.random.split(key, 3)[-1]
-    rbb['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch4)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch4,), dtype=jnp.float32)}
-    key = next_rng()
-    ibb = resnet_block_init(key, ch3, ch4)
-    tk = jax.random.split(key, 3)[-1]
-    ibb['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch4)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch4,), dtype=jnp.float32)}
-    params['real']['rb'] = rbb
-    params['imag']['rb'] = ibb
-    params['mb'] = mix_module_init(next_rng(), ch4, mixing * 1.5)
-
-    # attention modules
+    # Attention
     params['att1'] = self_attention_init(next_rng(), ch1)
     params['att2'] = self_attention_init(next_rng(), ch2)
     params['att3'] = self_attention_init(next_rng(), ch3)
-
-    # store attention scale as a static/leaf so callers can override or disable
     params['att_scale'] = att_scale
 
-    # decoder resnets
-    key = next_rng()
-    rd3 = resnet_block_init(key, ch4, ch3)
-    tk = jax.random.split(key, 3)[-1]
-    rd3['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
-    key = next_rng()
-    id3 = resnet_block_init(key, ch4, ch3)
-    tk = jax.random.split(key, 3)[-1]
-    id3['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
-    key = next_rng()
-    rd2 = resnet_block_init(key, ch3, ch2)
-    tk = jax.random.split(key, 3)[-1]
-    rd2['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
-    key = next_rng()
-    id2 = resnet_block_init(key, ch3, ch2)
-    tk = jax.random.split(key, 3)[-1]
-    id2['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
-    key = next_rng()
-    rd1 = resnet_block_init(key, ch2, ch1)
-    tk = jax.random.split(key, 3)[-1]
-    rd1['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
-    key = next_rng()
-    id1 = resnet_block_init(key, ch2, ch1)
-    tk = jax.random.split(key, 3)[-1]
-    id1['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
-    params['real']['d3'] = rd3
-    params['imag']['d3'] = id3
-    params['real']['d2'] = rd2
-    params['imag']['d2'] = id2
-    params['real']['d1'] = rd1
-    params['imag']['d1'] = id1
+    # Decoder blocks
+    params['d3'] = resnet_block_init(next_rng(), ch4, ch3)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['d3']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch3)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch3,), dtype=jnp.float32)}
+    params['d2'] = resnet_block_init(next_rng(), ch3, ch2)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['d2']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch2)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch2,), dtype=jnp.float32)}
+    params['d1'] = resnet_block_init(next_rng(), ch2, ch1)
+    tk = jax.random.split(next_rng(), 3)[-1]
+    params['d1']['t_proj'] = {'w': jax.random.normal(tk, (TIME_EMB_DIM, ch1)) * (1.0 / jnp.sqrt(TIME_EMB_DIM)), 'b': jnp.zeros((ch1,), dtype=jnp.float32)}
 
-    # projection convs to map concatenated skip+upsampled channels -> expected in_ch
     params['proj3'] = ws_conv_init(next_rng(), (1, 1, ch4 + ch3, ch4))
     params['proj2'] = ws_conv_init(next_rng(), (1, 1, ch3 + ch2, ch3))
     params['proj1'] = ws_conv_init(next_rng(), (1, 1, ch2 + ch1, ch2))
 
-    # final convs (1x1) as weight-standardized convs
-    params['final_real'] = ws_conv_init(next_rng(), (1, 1, ch1, C))
-    params['final_imag'] = ws_conv_init(next_rng(), (1, 1, ch1, C))
-    # zero-init final convs for stable diffusion training (start as identity-like)
-    params['final_real']['w'] = jnp.zeros_like(params['final_real']['w'])
-    params['final_real']['b'] = jnp.zeros_like(params['final_real']['b'])
-    params['final_imag']['w'] = jnp.zeros_like(params['final_imag']['w'])
-    params['final_imag']['b'] = jnp.zeros_like(params['final_imag']['b'])
+    # Final 1x1 conv to map ch1 to 2 (real/imag)
+    params['final'] = ws_conv_init(next_rng(), (1, 1, ch1, 2))
+    # params['final']['w'] = jnp.zeros_like(params['final']['w']) ## ZERO INIT FINAL LAYER FOR TESTING
+    # params['final']['b'] = jnp.zeros_like(params['final']['b'])
+
+    # #normalize params by dividing by their norm:
+    # params_norm = jnp.sqrt(sum([jnp.sum(v[k]**2) for v,k in params.items()]))
+    # params = {k: {'w': v['w']/params_norm, 'b': v['b']} if 'w' in v else v for k,v in params.items()}
 
     def apply_fn(params, x_complex, t):
         # x_complex: (H,W,1) or (N,H,W,1)
@@ -357,11 +299,9 @@ def complexUnet_init(rng, input_shape: Tuple[int, int, int], base_ch: int = 32, 
         if x.ndim == 3:
             x = x[None, ...]
             had_batch = False
-        # split streams
-        xr = jnp.real(x)
-        xi = jnp.imag(x)
+        # Stack real/imag as channels
+        x2 = jnp.concatenate([jnp.real(x), jnp.imag(x)], axis=-1)  # (..., 2)
 
-        # ensure t is a per-example vector of shape (B,)
         t = jnp.asarray(t)
         if t.ndim == 0:
             t = jnp.full((x.shape[0],), t.astype(jnp.float32), dtype=jnp.float32)
@@ -375,92 +315,56 @@ def complexUnet_init(rng, input_shape: Tuple[int, int, int], base_ch: int = 32, 
         else:
             raise ValueError('t must be scalar or 1-D array')
 
-        # attention residual scaling (can be overridden via params['att_scale'])
         att_scale = params.get('att_scale', 0.1)
 
-        # level 1
-        y_r1 = resnet_block_apply(params['real']['r1'], xr, t=t)
-        y_i1 = resnet_block_apply(params['imag']['r1'], xi, t=t)
-        y_r1, y_i1 = mix_module_apply(params['m1'], y_r1, y_i1)
-        y_r1 = y_r1 + att_scale * self_attention_apply(params['att1'], y_r1)
-        y_i1 = y_i1 + att_scale * self_attention_apply(params['att1'], y_i1)
-        # downsample
-        d_r1 = downsample(y_r1)
-        d_i1 = downsample(y_i1)
+        # Encoder
+        y1 = resnet_block_apply(params['r1'], x2, t=t)
+        y1 = ws_conv_apply(params['mix1'], y1)
+        y1 = y1 + att_scale * self_attention_apply(params['att1'], y1)
+        d1 = downsample(y1)
 
-        # level 2
-        y_r2 = resnet_block_apply(params['real']['r2'], d_r1, t=t)
-        y_i2 = resnet_block_apply(params['imag']['r2'], d_i1, t=t)
-        y_r2, y_i2 = mix_module_apply(params['m2'], y_r2, y_i2)
-        y_r2 = y_r2 + att_scale * self_attention_apply(params['att2'], y_r2)
-        y_i2 = y_i2 + att_scale * self_attention_apply(params['att2'], y_i2)
-        d_r2 = downsample(y_r2)
-        d_i2 = downsample(y_i2)
+        y2 = resnet_block_apply(params['r2'], d1, t=t)
+        y2 = ws_conv_apply(params['mix2'], y2)
+        y2 = y2 + att_scale * self_attention_apply(params['att2'], y2)
+        d2 = downsample(y2)
 
-        # level 3
-        y_r3 = resnet_block_apply(params['real']['r3'], d_r2, t=t)
-        y_i3 = resnet_block_apply(params['imag']['r3'], d_i2, t=t)
-        y_r3, y_i3 = mix_module_apply(params['m3'], y_r3, y_i3)
-        y_r3 = y_r3 + att_scale * self_attention_apply(params['att3'], y_r3)
-        y_i3 = y_i3 + att_scale * self_attention_apply(params['att3'], y_i3)
-        d_r3 = downsample(y_r3)
-        d_i3 = downsample(y_i3)
+        y3 = resnet_block_apply(params['r3'], d2, t=t)
+        y3 = ws_conv_apply(params['mix3'], y3)
+        y3 = y3 + att_scale * self_attention_apply(params['att3'], y3)
+        d3 = downsample(y3)
 
-        # bottleneck
-        y_rb = resnet_block_apply(params['real']['rb'], d_r3, t=t)
-        y_ib = resnet_block_apply(params['imag']['rb'], d_i3, t=t)
-        y_rb, y_ib = mix_module_apply(params['mb'], y_rb, y_ib)
+        # Bottleneck
+        yb = resnet_block_apply(params['rb'], d3, t=t)
+        yb = ws_conv_apply(params['mixb'], yb)
 
-        # decoder
-        u3_r = upsample(y_rb)
-        u3_i = upsample(y_ib)
-        # compute robustly: handle batched and unbatched
-        if u3_r.ndim == 4:
-            th = y_r3.shape[1] if y_r3.ndim == 4 else y_r3.shape[0]
-            tw = y_r3.shape[2] if y_r3.ndim == 4 else y_r3.shape[1]
-        else:
-            th = y_r3.shape[0]
-            tw = y_r3.shape[1]
-        u3_r = resize_to(u3_r, th, tw)
-        u3_i = resize_to(u3_i, th, tw)
-        u3_r = jnp.concatenate([u3_r, y_r3], axis=-1)
-        u3_i = jnp.concatenate([u3_i, y_i3], axis=-1)
-        u3_r = ws_conv_apply(params['proj3'], u3_r)
-        u3_i = ws_conv_apply(params['proj3'], u3_i)
-        u3_r = resnet_block_apply(params['real']['d3'], u3_r, t=t)
-        u3_i = resnet_block_apply(params['imag']['d3'], u3_i, t=t)
+        # Decoder
+        u3 = upsample(yb)
+        th, tw = y3.shape[1], y3.shape[2]
+        u3 = resize_to(u3, th, tw)
+        u3 = jnp.concatenate([u3, y3], axis=-1)
+        u3 = ws_conv_apply(params['proj3'], u3)
+        u3 = resnet_block_apply(params['d3'], u3, t=t)
 
-        u2_r = upsample(u3_r)
-        u2_i = upsample(u3_i)
-        # align to y_r2
-        th = y_r2.shape[1] if y_r2.ndim == 4 else y_r2.shape[0]
-        tw = y_r2.shape[2] if y_r2.ndim == 4 else y_r2.shape[1]
-        u2_r = resize_to(u2_r, th, tw)
-        u2_i = resize_to(u2_i, th, tw)
-        u2_r = jnp.concatenate([u2_r, y_r2], axis=-1)
-        u2_i = jnp.concatenate([u2_i, y_i2], axis=-1)
-        u2_r = ws_conv_apply(params['proj2'], u2_r)
-        u2_i = ws_conv_apply(params['proj2'], u2_i)
-        u2_r = resnet_block_apply(params['real']['d2'], u2_r, t=t)
-        u2_i = resnet_block_apply(params['imag']['d2'], u2_i, t=t)
+        u2 = upsample(u3)
+        th, tw = y2.shape[1], y2.shape[2]
+        u2 = resize_to(u2, th, tw)
+        u2 = jnp.concatenate([u2, y2], axis=-1)
+        u2 = ws_conv_apply(params['proj2'], u2)
+        u2 = resnet_block_apply(params['d2'], u2, t=t)
 
-        u1_r = upsample(u2_r)
-        u1_i = upsample(u2_i)
-        # align to y_r1
-        th = y_r1.shape[1] if y_r1.ndim == 4 else y_r1.shape[0]
-        tw = y_r1.shape[2] if y_r1.ndim == 4 else y_r1.shape[1]
-        u1_r = resize_to(u1_r, th, tw)
-        u1_i = resize_to(u1_i, th, tw)
-        u1_r = jnp.concatenate([u1_r, y_r1], axis=-1)
-        u1_i = jnp.concatenate([u1_i, y_i1], axis=-1)
-        u1_r = ws_conv_apply(params['proj1'], u1_r)
-        u1_i = ws_conv_apply(params['proj1'], u1_i)
-        u1_r = resnet_block_apply(params['real']['d1'], u1_r, t=t)
-        u1_i = resnet_block_apply(params['imag']['d1'], u1_i, t=t)
+        u1 = upsample(u2)
+        th, tw = y1.shape[1], y1.shape[2]
+        u1 = resize_to(u1, th, tw)
+        u1 = jnp.concatenate([u1, y1], axis=-1)
+        u1 = ws_conv_apply(params['proj1'], u1)
+        u1 = resnet_block_apply(params['d1'], u1, t=t)
 
-        out_r = ws_conv_apply(params['final_real'], u1_r)
-        out_i = ws_conv_apply(params['final_imag'], u1_i)
-        out = out_r + 1j * out_i
+        out2 = ws_conv_apply(params['final'], u1)
+        # Convert back to complex
+        out = out2[..., 0] + 1j * out2[..., 1]
+        # Always return (N, H, W, 1) shape for single-channel complex output
+        if out.ndim == 3:
+            out = out[..., None]
         if not had_batch:
             out = out[0]
         return out

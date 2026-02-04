@@ -6,46 +6,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from diffusion.sampler import make_sampler
-from diffusion.model import create_complexUnet
+from diffusion.model import create_complexUnet, load_checkpoint_params
 
-CKPT = '/local/scratch/cfikes/PtyCoDiff2/weights/no_attn/ckpt_020.pkl'
+CKPT = '/local/scratch/cfikes/PtyCoDiff2/weights/no_attn3.ckpt_100.npz'
 OUT = '/local/scratch/cfikes/PtyCoDiff2/weights/no_attn/sampled_images.png'
 P = 16
 
 print('Loading checkpoint', CKPT)
-with open(CKPT, 'rb') as f:
-    d = pickle.load(f)
-
-params_ckpt = d.get('ema_params', d.get('params'))
-if params_ckpt is None:
-    raise SystemExit('No params found in checkpoint')
-
-# Recreate an apply_fn with statics that match the checkpoint when possible.
-# Infer `base_ch`, `att_scale`, and `mixing` from the saved params to avoid
-# architecture mismatches when applying the checkpoint.
-rng = jax.random.PRNGKey(0)
-# sensible defaults
-base_ch = 32
-mixing = 0.1
-att_scale = 0.0
-if isinstance(params_ckpt, dict):
-    fr = params_ckpt.get('final_real')
-    if isinstance(fr, dict) and hasattr(fr.get('w'), 'shape'):
-        try:
-            base_ch = int(fr['w'].shape[2])
-        except Exception:
-            pass
-    # fetch stored att_scale if present
-    try:
-        att_scale = float(params_ckpt.get('att_scale', att_scale))
-    except Exception:
-        pass
-    # mixing module may store a scalar mix weight under 'm1' etc.
-    try:
-        mixing = float(params_ckpt.get('m1', {}).get('mix', mixing))
-    except Exception:
-        pass
-_, apply_fn = create_complexUnet(rng, input_shape=(28,28,1,1), base_ch=base_ch, mixing=mixing, att_scale=att_scale)
+params_ckpt, apply_fn = load_checkpoint_params(CKPT, jax.random.PRNGKey(0), input_shape=(28,28,1))
 
 cfg = {'n_t': 128, 'object_shape': (28,28,1), 'predicts_eps': True}
 print('Making sampler')
@@ -59,9 +27,12 @@ print('Sampling')
 samples = sampler_fn(params_ckpt, key, P=P)
 # samples: (P,H,W,C) complex
 
-# For visualization use real part and rescale from [-1,1] -> [0,1]
+# For visualization use real part. Map to [0,1] only if in [-1,1].
 imgs = np.array(jnp.real(samples))
-imgs = (imgs + 1.0) / 2.0
+mi = float(np.nanmin(imgs))
+ma = float(np.nanmax(imgs))
+if mi < -0.1 and ma <= 1.1:
+    imgs = (imgs + 1.0) / 2.0
 imgs = np.clip(imgs, 0.0, 1.0)
 
 ncol = 4
