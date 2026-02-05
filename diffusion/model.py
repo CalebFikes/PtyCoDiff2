@@ -5,6 +5,7 @@ All score / UNet code lives here per refactor request.
 
 from .complex_unet import complexUnet_init
 import warnings
+import jax
 import jax.numpy as jnp
 import copy
 import numpy as _np
