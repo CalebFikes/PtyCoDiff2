@@ -39,7 +39,6 @@ BETA=${BETA:-0.0}
 MU_MAX=${MU_MAX:-10.0}
 OUT_WEIGHTS=${OUT_WEIGHTS:-/local/scratch/cfikes/PtyCoDiff2/weights/no_attn3}
 BASE_CH=${BASE_CH:-16}
-MIXING=${MIXING:-0.0}
 ATT_SCALE=${ATT_SCALE:-0}
 N_T=${N_T:-128}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-10.0}
@@ -61,13 +60,13 @@ B2=${B2:-0.999}
 
 PYTHON_BIN="${ENV_PATH}/bin/python"
 if [ -x "${PYTHON_BIN}" ]; then
-	PYTHON_CMD="${PYTHON_BIN} -u /local/scratch/cfikes/PtyCoDiff2/training/train.py --dataset_dir ${DATASET_DIR} --epochs ${EPOCHS} --batch_size ${BATCH_SIZE} --lr ${LR} --gamma ${GAMMA} --ema_decay ${EMA_DECAY} --beta ${BETA} --mu_max ${MU_MAX} --base_ch ${BASE_CH} --mixing ${MIXING} --att_scale ${ATT_SCALE} --n_t ${N_T} --out_weights ${OUT_WEIGHTS} --max_grad_norm ${MAX_GRAD_NORM} --time_reweight_alpha ${TIME_REWEIGHT_ALPHA} --time_reweight_lambda ${TIME_REWEIGHT_LAMBDA} --dc_weight ${DC_WEIGHT} --b1 ${B1} --b2 ${B2}"
+	PYTHON_CMD="${PYTHON_BIN} -u /local/scratch/cfikes/PtyCoDiff2/training/train.py --dataset_dir ${DATASET_DIR} --epochs ${EPOCHS} --batch_size ${BATCH_SIZE} --lr ${LR} --gamma ${GAMMA} --ema_decay ${EMA_DECAY} --beta ${BETA} --mu_max ${MU_MAX} --base_ch ${BASE_CH} --att_scale ${ATT_SCALE} --n_t ${N_T} --out_weights ${OUT_WEIGHTS} --max_grad_norm ${MAX_GRAD_NORM} --time_reweight_alpha ${TIME_REWEIGHT_ALPHA} --time_reweight_lambda ${TIME_REWEIGHT_LAMBDA} --dc_weight ${DC_WEIGHT} --b1 ${B1} --b2 ${B2}"
 	if [ "${DIAGNOSTICS}" != "0" ]; then
 		PYTHON_CMD="${PYTHON_CMD} --diagnostics"
 	fi
 else
 	echo "Warning: ${PYTHON_BIN} not executable; falling back to conda run (may buffer logs)"
-	PYTHON_CMD="${CONDA_PKG} run -p ${ENV_PATH} python -u /local/scratch/cfikes/PtyCoDiff2/training/train.py --dataset_dir ${DATASET_DIR} --epochs ${EPOCHS} --batch_size ${BATCH_SIZE} --lr ${LR} --gamma ${GAMMA} --ema_decay ${EMA_DECAY} --beta ${BETA} --mu_max ${MU_MAX} --base_ch ${BASE_CH} --mixing ${MIXING} --att_scale ${ATT_SCALE} --n_t ${N_T} --out_weights ${OUT_WEIGHTS} --max_grad_norm ${MAX_GRAD_NORM} --time_reweight_alpha ${TIME_REWEIGHT_ALPHA} --time_reweight_lambda ${TIME_REWEIGHT_LAMBDA} --dc_weight ${DC_WEIGHT} --b1 ${B1} --b2 ${B2}"
+	PYTHON_CMD="${CONDA_PKG} run -p ${ENV_PATH} python -u /local/scratch/cfikes/PtyCoDiff2/training/train.py --dataset_dir ${DATASET_DIR} --epochs ${EPOCHS} --batch_size ${BATCH_SIZE} --lr ${LR} --gamma ${GAMMA} --ema_decay ${EMA_DECAY} --beta ${BETA} --mu_max ${MU_MAX} --base_ch ${BASE_CH} --att_scale ${ATT_SCALE} --n_t ${N_T} --out_weights ${OUT_WEIGHTS} --max_grad_norm ${MAX_GRAD_NORM} --time_reweight_alpha ${TIME_REWEIGHT_ALPHA} --time_reweight_lambda ${TIME_REWEIGHT_LAMBDA} --dc_weight ${DC_WEIGHT} --b1 ${B1} --b2 ${B2}"
 	if [ "${DIAGNOSTICS}" != "0" ]; then
 		PYTHON_CMD="${PYTHON_CMD} --diagnostics"
 	fi
