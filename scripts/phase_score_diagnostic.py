@@ -185,6 +185,9 @@ def main():
     p.add_argument('--newton_steps', type=int, default=8)
     p.add_argument('--eps', type=float, default=1e-3)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--normalize', type=str, default=None, choices=['n_pix', 'u_norm', 'none'],
+                   help='Normalization for h: n_pix (divide by number pixels) or u_norm (divide by ||u||^2)')
+    p.add_argument('--debug', action='store_true', help='Print per-sample diagnostics (small)')
     args = p.parse_args()
 
     rng = jax.random.PRNGKey(args.seed)
@@ -192,6 +195,7 @@ def main():
 
     params_pair, score_model = build_score_model_from_ckpt(args.ckpt, rng, input_shape=input_shape)
 
+    normalize = None if args.normalize == 'none' else args.normalize
     stats, phi, h, dh = run_phase_score_diagnostic(
         score_model,
         params_pair,
@@ -203,7 +207,22 @@ def main():
         K=args.K,
         newton_steps=args.newton_steps,
         eps=args.eps,
+        get_test_batch_fn=None,
     )
+
+    if args.debug:
+        # print simple norms and h-phi curve for a single sample
+        rng, sub = jax.random.split(rng)
+        u = default_get_test_batch(sub, min(4, args.batch_size), input_shape)
+        # compute norms
+        u_norm = jnp.sqrt(jnp.sum(jnp.abs(u) ** 2, axis=tuple(range(1, u.ndim))))
+        sc = score_model(params_pair, u, args.t)
+        sc_norm = jnp.sqrt(jnp.sum(jnp.abs(sc) ** 2, axis=tuple(range(1, sc.ndim))))
+        print('Debug: mean ||u|| =', float(jnp.mean(u_norm)), ' mean ||score|| =', float(jnp.mean(sc_norm)))
+        phis = jnp.linspace(0.0, 2 * jnp.pi, 64, endpoint=False)
+        for i in range(min(2, u.shape[0])):
+            hvals = jax.vmap(lambda ph: h_of_phi(score_model, params_pair, u[i:i+1], args.t, ph, normalize=normalize))(phis)
+            print(f'Debug sample {i}: h(phi) min {float(jnp.min(hvals))} max {float(jnp.max(hvals))} mean {float(jnp.mean(hvals))}')
 
     print("Phase-score diagnostic stats:")
     for k, v in stats.items():
