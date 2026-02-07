@@ -112,6 +112,7 @@ def run_phase_score_diagnostic(
     newton_steps=8,
     eps=1e-3,
     get_test_batch_fn=None,
+    normalize=None,
 ):
     if get_test_batch_fn is None:
         get_test_batch_fn = default_get_test_batch
@@ -120,12 +121,33 @@ def run_phase_score_diagnostic(
     all_dh = []
     all_phi = []
 
+    # training-style time discretization
+    n_t = 128
+    t_grid = jnp.linspace(0.0, 1.0, n_t + 1)
+
     for _ in range(N_batches):
         rng, subkey = jax.random.split(rng)
         u = get_test_batch_fn(subkey, batch_size, input_shape)
-        phi0, _ = find_phi_star_grid(score_model, params, u, t, K=K)
-        phi_star, h_star, dh_star = refine_phi_star_newton(score_model, params, u, t, phi0, n_steps=newton_steps, eps=eps)
-        all_h.append(jnp.abs(h_star))
+
+        # determine per-sample t values
+        if jnp.ndim(t) == 0:
+            t_scalar = float(t)
+            if t_scalar == 0.0:
+                rng, sub2 = jax.random.split(rng)
+                t_idx = jax.random.randint(sub2, (u.shape[0],), 1, n_t + 1)
+                t_vals = t_grid[t_idx]
+            else:
+                t_vals = t_scalar
+        else:
+            t_vals = t
+
+        # coarse grid search and Newton refinement (per-sample)
+        phi0, _ = find_phi_star_grid(score_model, params, u, t_vals, K=K, normalize=normalize)
+        phi_star, h_star, dh_star = refine_phi_star_newton(
+            score_model, params, u, t_vals, phi0, n_steps=newton_steps, eps=eps, normalize=normalize
+        )
+
+        all_h.append(h_star)
         all_dh.append(dh_star)
         all_phi.append(phi_star)
 
@@ -134,8 +156,8 @@ def run_phase_score_diagnostic(
     all_phi = jnp.concatenate(all_phi)
 
     stats = {
-        "mean_abs_h": float(jnp.mean(all_h)),
-        "median_abs_h": float(jnp.median(all_h)),
+        "mean_abs_h": float(jnp.mean(jnp.abs(all_h))),
+        "median_abs_h": float(jnp.median(jnp.abs(all_h))),
         "mean_dh": float(jnp.mean(all_dh)),
         "median_dh": float(jnp.median(all_dh)),
         "frac_negative_dh": float(jnp.mean(all_dh < 0.0)),
@@ -185,7 +207,7 @@ def main():
     p.add_argument('--newton_steps', type=int, default=8)
     p.add_argument('--eps', type=float, default=1e-3)
     p.add_argument('--seed', type=int, default=0)
-    p.add_argument('--normalize', type=str, default=None, choices=['n_pix', 'u_norm', 'none'],
+    p.add_argument('--normalize', type=str, default='n_pix', choices=['n_pix', 'u_norm', 'none'],
                    help='Normalization for h: n_pix (divide by number pixels) or u_norm (divide by ||u||^2)')
     p.add_argument('--debug', action='store_true', help='Print per-sample diagnostics (small)')
     args = p.parse_args()
@@ -208,6 +230,7 @@ def main():
         newton_steps=args.newton_steps,
         eps=args.eps,
         get_test_batch_fn=None,
+        normalize=normalize,
     )
 
     if args.debug:

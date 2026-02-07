@@ -29,16 +29,16 @@ export PYTHONUNBUFFERED=1
 export JAX_LOG_COMPILES=1
 
 # Exposed hyperparameters (can be overridden by environment or sbatch `--export`)
-DATASET_DIR=${DATASET_DIR:-/local/scratch/cfikes/datasets/mnist}
-EPOCHS=${EPOCHS:-50}
+DATASET_DIR=${DATASET_DIR:-/local/scratch/cfikes/PtyCoDiff2/datasets/mnist}
+EPOCHS=${EPOCHS:-100}
 BATCH_SIZE=${BATCH_SIZE:-128}
 LR=${LR:-1e-3}
 GAMMA=${GAMMA:-0.99999}
 EMA_DECAY=${EMA_DECAY:-0.99}
-BETA=${BETA:-0.0}
+BETA=${BETA:-0.1}
 MU_MAX=${MU_MAX:-10.0}
-OUT_WEIGHTS=${OUT_WEIGHTS:-/local/scratch/cfikes/PtyCoDiff2/weights/no_attn3}
-BASE_CH=${BASE_CH:-16}
+OUT_WEIGHTS=${OUT_WEIGHTS:-/local/scratch/cfikes/PtyCoDiff2/weights/2ch2}
+BASE_CH=${BASE_CH:-64}
 ATT_SCALE=${ATT_SCALE:-0}
 N_T=${N_T:-128}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-10.0}

@@ -113,21 +113,36 @@ def load_mnist_fallback() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
         )
 
 
-def make_complex_pairs(x: np.ndarray, y: np.ndarray, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_complex_pairs(
+    x: np.ndarray,
+    y: np.ndarray,
+    seed: int = 0,
+    n_samples: int | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Create complex-valued paired samples by sampling with replacement.
+
+    If `n_samples` is None the function returns len(x) samples (original behavior).
+    Otherwise it draws `n_samples` pairs independently with replacement from x.
+    """
     rng = np.random.RandomState(seed)
     N = x.shape[0]
-    idx2 = rng.randint(0, N, size=N)
+    if n_samples is None:
+        n_samples = N
 
-    real = x.astype(np.float32) / 255.0
-    imag = x[idx2].astype(np.float32) / 255.0
+    # draw indices for real and imag independently with replacement
+    idx_real = rng.randint(0, N, size=n_samples)
+    idx_imag = rng.randint(0, N, size=n_samples)
 
-    # shape to (N, H, W, 1)
+    real = x[idx_real].astype(np.float32) / 255.0
+    imag = x[idx_imag].astype(np.float32) / 255.0
+
+    # shape to (n_samples, H, W, 1)
     real = real[..., None]
     imag = imag[..., None]
 
     images = (real + 1j * imag).astype(np.complex64)
-    labels_real = y.astype(np.int64)
-    labels_imag = y[idx2].astype(np.int64)
+    labels_real = y[idx_real].astype(np.int64)
+    labels_imag = y[idx_imag].astype(np.int64)
     return images, labels_real, labels_imag
 
 
@@ -136,11 +151,11 @@ def save_npz(images: np.ndarray, labels_real: np.ndarray, labels_imag: np.ndarra
     np.savez_compressed(path, images=images, labels_real=labels_real, labels_imag=labels_imag)
 
 
-def main(outdir: str = 'datasets/mnist', seed: int = 0):
+def main(outdir: str = 'datasets/mnist', seed: int = 0, n_train: int | None = 100000, n_test: int | None = None):
     x_train, y_train, x_test, y_test = load_mnist_fallback()
 
-    train_images, train_lr, train_li = make_complex_pairs(x_train, y_train, seed=seed)
-    test_images, test_lr, test_li = make_complex_pairs(x_test, y_test, seed=seed + 1)
+    train_images, train_lr, train_li = make_complex_pairs(x_train, y_train, seed=seed, n_samples=n_train)
+    test_images, test_lr, test_li = make_complex_pairs(x_test, y_test, seed=seed + 1, n_samples=n_test)
 
     train_path = os.path.join(outdir, 'train.npz')
     test_path = os.path.join(outdir, 'test.npz')
@@ -156,5 +171,9 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--outdir', type=str, default='datasets/mnist')
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--n_train', type=int, default=100000,
+                   help='Number of training paired samples to generate (with replacement)')
+    p.add_argument('--n_test', type=int, default=None,
+                   help='Number of test paired samples to generate (with replacement); default preserves original test size')
     args = p.parse_args()
-    main(outdir=args.outdir, seed=args.seed)
+    main(outdir=args.outdir, seed=args.seed, n_train=args.n_train, n_test=args.n_test)
